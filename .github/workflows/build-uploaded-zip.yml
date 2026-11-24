@@ -42,8 +42,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/hossein-source"
           curl --fail --location --retry 3 --silent --show-error "$SOURCE_ZIP_URL" -o "$RUNNER_TEMP/source.zip"
           python3 - <<'PY'
-          import zipfile, pathlib, sys
-          p = pathlib.Path("$RUNNER_TEMP/source.zip")
+          import zipfile, pathlib, sys, os
+          p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "source.zip"
           with zipfile.ZipFile(p) as z:
               infos = z.infolist()
               if len(infos) > 10000: sys.exit("ZIP contains too many entries")
