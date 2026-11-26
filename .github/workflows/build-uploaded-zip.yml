@@ -67,7 +67,8 @@ jobs:
           unzip -q "$RUNNER_TEMP/source.zip" -d "$RUNNER_TEMP/hossein-source"
           python3 - <<'PY'
           from pathlib import Path
-          root = Path("$RUNNER_TEMP/hossein-source")
+          import os
+          root = Path(os.environ["RUNNER_TEMP"]) / "hossein-source"
           kt = next(root.rglob("MainActivity.kt"))
           s = kt.read_text()
           s = s.replace("import java.nio.charset.Charsets", "import java.nio.charset.StandardCharsets")
