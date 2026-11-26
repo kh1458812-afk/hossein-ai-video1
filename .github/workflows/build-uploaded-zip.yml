@@ -70,6 +70,9 @@ jobs:
           test -f "$ANDROID_DIR/app/build.gradle.kts"
           test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
           chmod +x "$ANDROID_DIR/gradlew"
+          BUILD_FILE="$ANDROID_DIR/app/build.gradle.kts"
+          sed -i '1i import java.util.Properties' "$BUILD_FILE"
+          sed -i 's/java.util.Properties()/Properties()/' "$BUILD_FILE"
           echo "ANDROID_DIR=$ANDROID_DIR" >> "$GITHUB_ENV"
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
