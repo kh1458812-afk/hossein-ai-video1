@@ -65,6 +65,29 @@ jobs:
           PY
           mkdir -p "$RUNNER_TEMP/hossein-source"
           unzip -q "$RUNNER_TEMP/source.zip" -d "$RUNNER_TEMP/hossein-source"
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("$RUNNER_TEMP/hossein-source")
+          kt = next(root.rglob("MainActivity.kt"))
+          s = kt.read_text()
+          s = s.replace("import java.nio.charset.Charsets", "import java.nio.charset.StandardCharsets")
+          s = s.replace("Charsets.UTF_8", "StandardCharsets.UTF_8")
+          s = s.replace("import androidx.compose.foundation.background", "import androidx.compose.foundation.BorderStroke\nimport androidx.compose.foundation.background\nimport androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Diamond\nimport androidx.compose.material.icons.filled.History\nimport androidx.compose.material.icons.filled.Logout")
+          s = s.replace("    val initSubscription by remember {", "    LaunchedEffect(Unit) {")
+          s = s.replace("monthlyLimit!", "monthlyLimit!!")
+          s = s.replace("json.optJSONObject(\"usage\")?.keys() ?: return emptyList()", "json.optJSONObject(\"usage\")?.keys() ?: return@withContext emptyList()")
+          lines = s.splitlines()
+          i = next((i for i, line in enumerate(lines) if 'colors = FilterChipDefaults.colors(' in line), -1)
+          if i >= 0: del lines[i:i+4]
+          s = chr(10).join(lines) + chr(10)
+          kt.write_text(s)
+          android_dir = next(root.rglob("gradlew")).parent
+          gradle_file = android_dir / "app/build.gradle.kts"
+          g = gradle_file.read_text()
+          marker = 'implementation("androidx.compose.material3:material3")'
+          if marker in g and 'material-icons-extended' not in g: g = g.replace(marker, marker + chr(10) + '    implementation("androidx.compose.material:material-icons-extended")')
+          gradle_file.write_text(g)
+          PY
           ANDROID_DIR="$RUNNER_TEMP/hossein-source/Hossein_AI_Complete_Source_v0.5.2/android"
           test -f "$ANDROID_DIR/settings.gradle.kts"
           test -f "$ANDROID_DIR/app/build.gradle.kts"
