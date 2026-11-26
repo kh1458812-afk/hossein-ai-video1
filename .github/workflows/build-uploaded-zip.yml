@@ -1,4 +1,4 @@
-name: Build APK from uploaded ZIP
+name: Build HOSSEIN AI Android APK
 run-name: APK build ${{inputs.build_id}}
 
 on:
@@ -13,25 +13,27 @@ on:
         required: true
         type: string
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions: {}
+    permissions:
+      contents: read
     steps:
-      - name: Set up Java 21
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - name: Download and extract ZIP
+          java-version: '17'
+          cache: gradle
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android platform and build tools
+        run: sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Download and validate private source ZIP
         env:
           SOURCE_ZIP_URL: ${{secrets[inputs.source_secret_name]}}
         run: |
@@ -39,7 +41,6 @@ jobs:
           if [ -z "$SOURCE_ZIP_URL" ]; then echo "Encrypted source URL secret is missing"; exit 1; fi
           echo "::add-mask::$SOURCE_ZIP_URL"
           case "$SOURCE_ZIP_URL" in https://*) ;; *) echo "HTTPS URL required"; exit 1 ;; esac
-          mkdir -p "$RUNNER_TEMP/hossein-source"
           curl --fail --location --retry 3 --silent --show-error "$SOURCE_ZIP_URL" -o "$RUNNER_TEMP/source.zip"
           python3 - <<'PY'
           import zipfile, pathlib, sys, os
@@ -47,38 +48,38 @@ jobs:
           with zipfile.ZipFile(p) as z:
               infos = z.infolist()
               if len(infos) > 10000: sys.exit("ZIP contains too many entries")
-              total = sum(i.file_size for i in infos)
-              if total > 1024 * 1024 * 1024: sys.exit("ZIP expands beyond 1 GiB")
+              if sum(i.file_size for i in infos) > 1024 * 1024 * 1024: sys.exit("ZIP expands beyond 1 GiB")
               for i in infos:
                   n = pathlib.PurePosixPath(i.filename)
                   if n.is_absolute() or '..' in n.parts: sys.exit("Unsafe ZIP path")
               bad = z.testzip()
               if bad: sys.exit("Corrupt ZIP entry: " + bad)
+              required = 'Hossein_AI_Complete_Source_v0.5.2/android/gradlew'
+              if required not in z.namelist(): sys.exit("Expected Kotlin/Gradle Android source is missing")
           PY
+          mkdir -p "$RUNNER_TEMP/hossein-source"
           unzip -q "$RUNNER_TEMP/source.zip" -d "$RUNNER_TEMP/hossein-source"
-          PROJECT_DIR="$(find "$RUNNER_TEMP/hossein-source" -name pubspec.yaml -not -path '*/.dart_tool/*' -print -quit | xargs -r dirname)"
-          if [ -z "$PROJECT_DIR" ]; then echo "No pubspec.yaml found in ZIP"; exit 1; fi
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-      - name: Ensure Android platform exists
-        working-directory: ${{env.PROJECT_DIR}}
-        run: |
-          if [ ! -d android ]; then flutter create --platforms=android .; fi
-      - name: Resolve dependencies
-        working-directory: ${{env.PROJECT_DIR}}
-        run: flutter pub get
-      - name: Analyze source
-        working-directory: ${{env.PROJECT_DIR}}
-        run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
-      - name: Build release APK
-        working-directory: ${{env.PROJECT_DIR}}
+          ANDROID_DIR="$RUNNER_TEMP/hossein-source/Hossein_AI_Complete_Source_v0.5.2/android"
+          test -f "$ANDROID_DIR/settings.gradle.kts"
+          test -f "$ANDROID_DIR/app/build.gradle.kts"
+          test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+          chmod +x "$ANDROID_DIR/gradlew"
+          echo "ANDROID_DIR=$ANDROID_DIR" >> "$GITHUB_ENV"
+      - name: Compile Android debug APK
+        working-directory: ${{env.ANDROID_DIR}}
         run: |
           set -euo pipefail
-          flutter build apk --release
-          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          ./gradlew --no-daemon --stacktrace clean assembleDebug
+          APK_PATH='app/build/outputs/apk/debug/app-debug.apk'
           test -s "$APK_PATH"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
           mkdir -p "$RUNNER_TEMP/apk-output"
           cp "$APK_PATH" "$RUNNER_TEMP/apk-output/app-release.apk"
-      - name: Upload APK artifact
+          sha256sum "$RUNNER_TEMP/apk-output/app-release.apk"
+          ls -lh "$RUNNER_TEMP/apk-output/app-release.apk"
+      - name: Upload verified APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{inputs.build_id}}
