@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       source_secret_name:
-        description: Name of the encrypted repository secret holding the private source URL
+        description: Encrypted repository secret containing the private ZIP URL
         required: true
         type: string
       build_id:
@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -28,94 +28,94 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Configure Android SDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android platforms and build tools
         run: |
           set -euo pipefail
-          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-          test -x "$SDKMANAGER"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           set +o pipefail
-          yes | "$SDKMANAGER" --licenses
+          yes | sdkmanager --licenses >/dev/null
           set -o pipefail
-          "$SDKMANAGER" --install 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Download and validate private source ZIP
+          sdkmanager 'platform-tools' 'platforms;android-34' 'platforms;android-35' 'platforms;android-36' 'build-tools;34.0.0' 'build-tools;35.0.0' 'build-tools;36.0.0'
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Download, validate and detect source project
         env:
           SOURCE_ZIP_URL: ${{secrets[inputs.source_secret_name]}}
         run: |
           set -euo pipefail
-          if [ -z "$SOURCE_ZIP_URL" ]; then echo "Encrypted source URL secret is missing"; exit 1; fi
+          test -n "$SOURCE_ZIP_URL" || { echo 'Missing encrypted source URL secret'; exit 1; }
           echo "::add-mask::$SOURCE_ZIP_URL"
-          case "$SOURCE_ZIP_URL" in https://*) ;; *) echo "HTTPS URL required"; exit 1 ;; esac
+          case "$SOURCE_ZIP_URL" in https://*) ;; *) echo 'HTTPS URL required'; exit 1 ;; esac
           curl --fail --location --retry 3 --silent --show-error "$SOURCE_ZIP_URL" -o "$RUNNER_TEMP/source.zip"
           python3 - <<'PY'
-          import zipfile, pathlib, sys, os
-          p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "source.zip"
-          with zipfile.ZipFile(p) as z:
-              infos = z.infolist()
-              if len(infos) > 10000: sys.exit("ZIP contains too many entries")
-              if sum(i.file_size for i in infos) > 1024 * 1024 * 1024: sys.exit("ZIP expands beyond 1 GiB")
-              for i in infos:
-                  n = pathlib.PurePosixPath(i.filename)
-                  if n.is_absolute() or '..' in n.parts: sys.exit("Unsafe ZIP path")
+          import os, pathlib, stat, sys, zipfile
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'source.zip'
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'source-tree'
+          root.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(archive) as z:
+              entries = z.infolist()
+              if not entries or len(entries) > 10000: sys.exit('ZIP is empty or contains too many entries')
+              if sum(i.file_size for i in entries) > 1024**3: sys.exit('ZIP expands beyond 1 GiB')
+              for item in entries:
+                  name = pathlib.PurePosixPath(item.filename)
+                  if name.is_absolute() or '..' in name.parts: sys.exit('Unsafe ZIP path detected')
+                  if stat.S_ISLNK(item.external_attr >> 16): sys.exit('Symbolic links are not allowed in source ZIP')
               bad = z.testzip()
-              if bad: sys.exit("Corrupt ZIP entry: " + bad)
-              required = 'Hossein_AI_Complete_Source_v0.5.2/android/gradlew'
-              if required not in z.namelist(): sys.exit("Expected Kotlin/Gradle Android source is missing")
+              if bad: sys.exit('Corrupt ZIP entry: ' + bad)
+              z.extractall(root)
+          flutter = [p.parent for p in root.rglob('pubspec.yaml') if (p.parent / 'android').is_dir()]
+          gradle = [p.parent for p in list(root.rglob('settings.gradle')) + list(root.rglob('settings.gradle.kts')) if (p.parent / 'app').is_dir() and any((p.parent / 'app' / n).is_file() for n in ('build.gradle', 'build.gradle.kts'))]
+          if flutter:
+              project = min(flutter, key=lambda p: len(p.parts))
+              kind = 'flutter'
+          elif gradle:
+              project = min(gradle, key=lambda p: len(p.parts))
+              kind = 'gradle'
+          else:
+              sys.exit('No supported project found: expected Flutter pubspec.yaml + android/ or Android settings.gradle + app module')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('PROJECT_DIR=' + str(project) + '\n')
+              env.write('BUILD_KIND=' + kind + '\n')
+          print('Detected project type:', kind)
+          print('Project directory:', project)
           PY
-          mkdir -p "$RUNNER_TEMP/hossein-source"
-          unzip -q "$RUNNER_TEMP/source.zip" -d "$RUNNER_TEMP/hossein-source"
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          root = Path(os.environ["RUNNER_TEMP"]) / "hossein-source"
-          kt = next(root.rglob("MainActivity.kt"))
-          s = kt.read_text()
-          s = s.replace("import java.nio.charset.Charsets", "import java.nio.charset.StandardCharsets")
-          s = s.replace("Charsets.UTF_8", "StandardCharsets.UTF_8")
-          s = s.replace("import androidx.compose.foundation.background", "import androidx.compose.foundation.BorderStroke\nimport androidx.compose.foundation.background\nimport androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Diamond\nimport androidx.compose.material.icons.filled.History\nimport androidx.compose.material.icons.filled.Logout")
-          s = s.replace("    val initSubscription by remember {", "    LaunchedEffect(Unit) {")
-          s = s.replace("monthlyLimit!", "monthlyLimit!!")
-          s = s.replace("json.optJSONObject(\"usage\")?.keys() ?: return emptyList()", "json.optJSONObject(\"usage\")?.keys() ?: return@withContext emptyList()")
-          lines = s.splitlines()
-          i = next((i for i, line in enumerate(lines) if 'colors = FilterChipDefaults.colors(' in line), -1)
-          if i >= 0: del lines[i:i+4]
-          s = chr(10).join(lines) + chr(10)
-          kt.write_text(s)
-          android_dir = next(root.rglob("gradlew")).parent
-          gradle_file = android_dir / "app/build.gradle.kts"
-          g = gradle_file.read_text()
-          marker = 'implementation("androidx.compose.material3:material3")'
-          if marker in g and 'material-icons-extended' not in g: g = g.replace(marker, marker + chr(10) + '    implementation("androidx.compose.material:material-icons-extended")')
-          gradle_file.write_text(g)
-          PY
-          ANDROID_DIR="$RUNNER_TEMP/hossein-source/Hossein_AI_Complete_Source_v0.5.2/android"
-          test -f "$ANDROID_DIR/settings.gradle.kts"
-          test -f "$ANDROID_DIR/app/build.gradle.kts"
-          test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
-          chmod +x "$ANDROID_DIR/gradlew"
-          BUILD_FILE="$ANDROID_DIR/app/build.gradle.kts"
-          sed -i '1i import java.util.Properties' "$BUILD_FILE"
-          sed -i 's/java.util.Properties()/Properties()/' "$BUILD_FILE"
-          echo "ANDROID_DIR=$ANDROID_DIR" >> "$GITHUB_ENV"
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-      - name: Compile Android debug APK
-        working-directory: ${{env.ANDROID_DIR}}
+      - name: Build Flutter release APK
+        if: env.BUILD_KIND == 'flutter'
+        working-directory: ${{env.PROJECT_DIR}}
         run: |
           set -euo pipefail
-          gradle --no-daemon --stacktrace clean assembleDebug
-          APK_PATH='app/build/outputs/apk/debug/app-debug.apk'
-          test -s "$APK_PATH"
-          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-          test -x "$APKSIGNER"
-          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
+          flutter doctor --android-licenses
+          flutter pub get
+          flutter build apk --release
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          mkdir -p "$RUNNER_TEMP/apk-output"
+          cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/apk-output/app-release.apk"
+      - name: Build native Android release APK
+        if: env.BUILD_KIND == 'gradle'
+        working-directory: ${{env.PROJECT_DIR}}
+        run: |
+          set -euo pipefail
+          test -f gradlew || { echo 'Gradle wrapper is missing'; exit 1; }
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+          APK_PATH=$(find app/build/outputs/apk/release -type f -name '*.apk' -print -quit)
+          test -n "$APK_PATH" && test -s "$APK_PATH" || { echo 'Release APK was not produced'; exit 1; }
           mkdir -p "$RUNNER_TEMP/apk-output"
           cp "$APK_PATH" "$RUNNER_TEMP/apk-output/app-release.apk"
-          sha256sum "$RUNNER_TEMP/apk-output/app-release.apk"
-          ls -lh "$RUNNER_TEMP/apk-output/app-release.apk"
+      - name: Verify APK and print checksum
+        run: |
+          set -euo pipefail
+          APK="$RUNNER_TEMP/apk-output/app-release.apk"
+          test -s "$APK"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          sha256sum "$APK"
+          ls -lh "$APK"
       - name: Upload verified APK artifact
         uses: actions/upload-artifact@v4
         with:
